@@ -10,6 +10,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "googleapis": "^149.0.0"
+    "@google-cloud/vertexai": "^1.10.0",
+    "googleapis": "^149.0.0",
+    "readline-sync": "^1.4.10"
   }
 }
