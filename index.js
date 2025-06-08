@@ -1,24 +1,17 @@
-// index.js
-
+const TelegramBot = require("node-telegram-bot-api");
+const { VertexAI } = require("@google-cloud/vertexai");
+const { TELEGRAM_KEY } = require("./telegram.js");
 const { GoogleAuth } = require("google-auth-library");
 const { google } = require("googleapis");
-const { VertexAI } = require("@google-cloud/vertexai");
-const readlineSync = require("readline-sync");
 const path = require("path");
-const fs = require("fs");
 
 // --- Configuration ---
 const SERVICE_ACCOUNT_FILE = path.join(__dirname, "credentials.json");
-const SPREADSHEET_ID = "1uyWTJ6sWMcoSu7o4bAiJ0eXWauJKC0car3yyWbEk3Vc"; // <--- IMPORTANT: REPLACE THIS!
-const WORKSHEET_NAME = "Sheet1"; // The exact name of your sheet within the spreadsheet
-
-// --- Vertex AI / Gemini Configuration ---
-const PROJECT_ID = "sheet-gemini-poc"; // <--- IMPORTANT: REPLACE WITH YOUR GCP PROJECT ID
-const LOCATION = "asia-south1"; // Or your preferred region for Vertex AI
-const MODEL_NAME = "gemini-1.5-flash"; // Or 'gemini-1.5-pro-001'
-const API_VERSION = "v1beta"; // Keep this as v1beta for now
-
-// Scopes for Google Sheets API (read/write access)
+const SPREADSHEET_ID = "1uyWTJ6sWMcoSu7o4bAiJ0eXWauJKC0car3yyWbEk3Vc";
+const WORKSHEET_NAME = "Sheet1";
+const PROJECT_ID = "sheet-gemini-poc";
+const LOCATION = "asia-south1";
+const MODEL_NAME = "gemini-1.5-flash";
 const SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 
 // --- Sheets Service Class ---
@@ -125,10 +118,9 @@ class SheetsService {
       `\n--- Attempting to update item: ${itemName} to quantity ${newQuantity} ---`
     );
     try {
-      // First, get all values to find the row index
       const allValuesResponse = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${this.worksheetName}!A:D`, // Get enough columns to find item name and quantity
+        range: `${this.worksheetName}!A:D`,
       });
 
       const rows = allValuesResponse.data.values;
@@ -146,12 +138,11 @@ class SheetsService {
         quantityColIndex === -1 ||
         lastUpdatedColIndex === -1
       ) {
-        return "Error: Missing expected column (Item Name, Quantity, or Last Updated) in your sheet headers. Please ensure the sheet has these exact headers.";
+        return "Error: Missing expected column (Item Name, Quantity, or Last Updated) in your sheet headers.";
       }
 
       let rowIndex = -1;
       for (let i = 1; i < rows.length; i++) {
-        // Start from 1 to skip headers
         if (rows[i][itemColIndex]?.toLowerCase() === itemName.toLowerCase()) {
           rowIndex = i;
           break;
@@ -162,9 +153,7 @@ class SheetsService {
         return `Item '${itemName}' not found in inventory.`;
       }
 
-      const currentRowNumber = rowIndex + 1; // Google Sheets is 1-indexed
-
-      // Batch update for Quantity and Last Updated timestamp
+      const currentRowNumber = rowIndex + 1;
       const currentTime = new Date()
         .toLocaleString("en-CA", {
           year: "numeric",
@@ -208,222 +197,212 @@ class SheetsService {
   }
 }
 
-// --- Main Application Logic ---
-async function main() {
-  // --- Authenticate Google Sheets API ---
-  let authClient;
+// Initialize Telegram Bot
+const bot = new TelegramBot(TELEGRAM_KEY, {
+  polling: true,
+  filepath: false,
+});
+
+// Add error handling
+bot.on("polling_error", (error) => {
+  console.error("Polling error:", error);
+});
+
+bot.on("error", (error) => {
+  console.error("Bot error:", error);
+});
+
+// Store chat sessions
+const chatSessions = new Map();
+
+// Initialize the bot
+async function initializeBot() {
   try {
+    // Authenticate Google Sheets API
     const auth = new GoogleAuth({
       keyFile: SERVICE_ACCOUNT_FILE,
       scopes: SHEETS_SCOPES,
     });
-    authClient = await auth.getClient();
+    const authClient = await auth.getClient();
     console.log("Sheets API Authentication successful!");
-  } catch (err) {
-    console.error("Sheets API Authentication failed:", err);
-    console.error(
-      "Please ensure the service account has appropriate roles (e.g., Editor) and credentials.json is valid."
-    );
-    process.exit(1);
-  }
 
-  const sheetsService = new SheetsService(authClient);
-  await sheetsService.getSheetInstance(); // Verify connection to spreadsheet
+    const sheetsService = new SheetsService(authClient);
+    await sheetsService.getSheetInstance();
 
-  // --- Initialize Vertex AI for Gemini ---
-  const vertexAI = new VertexAI({ project: PROJECT_ID, location: LOCATION });
-  const model = vertexAI.getGenerativeModel({ model: MODEL_NAME });
-  console.log("Vertex AI Authentication successful!");
+    // Initialize Vertex AI
+    const vertexAI = new VertexAI({ project: PROJECT_ID, location: LOCATION });
+    const model = vertexAI.getGenerativeModel({ model: MODEL_NAME });
+    console.log("Vertex AI Authentication successful!");
 
-  console.log(`\n--- Gemini as Sheets Interface (${MODEL_NAME}) ---`);
-  console.log(
-    "You can now tell me what to do with your 'Inventory PoC' spreadsheet."
-  );
-  console.log("Try commands like:");
-  console.log("- 'Read the inventory'");
-  console.log("- 'Add a new item called Laptop, quantity 5, price 1200'");
-  console.log("- 'Update the quantity of Mouse to 55'");
-  console.log("- 'Exit' to quit.\n");
-
-  // --- Define Tools for Gemini ---
-  const tools = [
-    {
-      functionDeclarations: [
-        {
-          name: "readInventory",
-          description:
-            "Reads and lists all items currently in the inventory spreadsheet.",
-          parameters: {
-            type: "object",
-            properties: {}, // No parameters needed
-          },
-        },
-        {
-          name: "addRow",
-          description:
-            "Adds a new item with its quantity and price to the inventory spreadsheet.",
-          parameters: {
-            type: "object",
-            properties: {
-              itemName: {
-                type: "string",
-                description: "The name of the item to add.",
-              },
-              quantity: {
-                type: "number",
-                description: "The quantity of the new item.",
-              },
-              price: {
-                type: "number",
-                description: "The price of a single unit of the new item.",
-              },
+    // Define tools for Gemini
+    const tools = [
+      {
+        functionDeclarations: [
+          {
+            name: "readInventory",
+            description:
+              "Reads and lists all items currently in the inventory spreadsheet.",
+            parameters: {
+              type: "object",
+              properties: {},
             },
-            required: ["itemName", "quantity", "price"],
           },
-        },
-        {
-          name: "updateItemQuantity",
-          description:
-            "Updates the quantity of an existing item in the inventory spreadsheet.",
-          parameters: {
-            type: "object",
-            properties: {
-              itemName: {
-                type: "string",
-                description:
-                  "The name of the item whose quantity needs to be updated.",
+          {
+            name: "addRow",
+            description:
+              "Adds a new item with its quantity and price to the inventory spreadsheet.",
+            parameters: {
+              type: "object",
+              properties: {
+                itemName: {
+                  type: "string",
+                  description: "The name of the item to add.",
+                },
+                quantity: {
+                  type: "number",
+                  description: "The quantity of the new item.",
+                },
+                price: {
+                  type: "number",
+                  description: "The price of a single unit of the new item.",
+                },
               },
-              newQuantity: {
-                type: "number",
-                description: "The new quantity for the item.",
-              },
+              required: ["itemName", "quantity", "price"],
             },
-            required: ["itemName", "newQuantity"],
           },
-        },
-      ],
-    },
-  ];
+          {
+            name: "updateItemQuantity",
+            description:
+              "Updates the quantity of an existing item in the inventory spreadsheet.",
+            parameters: {
+              type: "object",
+              properties: {
+                itemName: {
+                  type: "string",
+                  description:
+                    "The name of the item whose quantity needs to be updated.",
+                },
+                newQuantity: {
+                  type: "number",
+                  description: "The new quantity for the item.",
+                },
+              },
+              required: ["itemName", "newQuantity"],
+            },
+          },
+        ],
+      },
+    ];
 
-  const chat = model.startChat({ tools: tools });
+    // Handle incoming messages
+    bot.on("message", async (msg) => {
+      const chatId = msg.chat.id;
 
-  // --- Function to handle tool calls ---
-  async function callTool(functionCall) {
-    const { name, args } = functionCall;
-    console.log(
-      `\nGemini requested to call function: ${name} with args:`,
-      args
-    );
+      // Only process text messages
+      if (!msg.text) {
+        return;
+      }
 
-    if (sheetsService[name] && typeof sheetsService[name] === "function") {
+      console.log("message", msg.text);
+
       try {
-        const result = await sheetsService[name](...Object.values(args));
-        return {
-          functionResponse: {
-            name: name,
-            response: { content: result },
-          },
-        };
+        // Get or create chat session
+        if (!chatSessions.has(chatId)) {
+          chatSessions.set(chatId, model.startChat({ tools: tools }));
+        }
+        const chat = chatSessions.get(chatId);
+
+        // Process message with Gemini
+        const result = await chat.sendMessage(msg.text);
+        const response = result.response;
+
+        if (response.candidates?.[0]?.content?.parts?.[0]?.functionCall) {
+          // Handle function call
+          const functionCall =
+            response.candidates[0].content.parts[0].functionCall;
+          const toolResponse = await callTool(functionCall, sheetsService);
+
+          // Send function result back to Gemini
+          const apiResponse = await chat.sendMessage([toolResponse]);
+          const finalResponse =
+            apiResponse?.response?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+          if (finalResponse) {
+            await bot.sendMessage(chatId, finalResponse);
+          } else {
+            await bot.sendMessage(
+              chatId,
+              "I encountered an error processing your request. Please try again."
+            );
+          }
+        } else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
+          // Direct text response
+          await bot.sendMessage(
+            chatId,
+            response.candidates[0].content.parts[0].text
+          );
+        } else {
+          await bot.sendMessage(
+            chatId,
+            "I couldn't process your request. Please try again."
+          );
+        }
       } catch (error) {
-        console.error(`Error executing tool ${name}:`, error);
+        console.error("Error processing message:", error);
+        await bot.sendMessage(
+          chatId,
+          "Sorry, I encountered an error. Please try again."
+        );
+      }
+    });
+
+    // Function to handle tool calls
+    async function callTool(functionCall, sheetsService) {
+      const { name, args } = functionCall;
+      console.log(
+        `\nGemini requested to call function: ${name} with args:`,
+        args
+      );
+
+      if (sheetsService[name] && typeof sheetsService[name] === "function") {
+        try {
+          const result = await sheetsService[name](...Object.values(args));
+          return {
+            functionResponse: {
+              name: name,
+              response: { content: result },
+            },
+          };
+        } catch (error) {
+          console.error(`Error executing tool ${name}:`, error);
+          return {
+            functionResponse: {
+              name: name,
+              response: {
+                content: `Error: Failed to execute tool ${name}. ${error.message}`,
+              },
+            },
+          };
+        }
+      } else {
+        console.error(`Error: Function ${name} not found in sheetsService.`);
         return {
           functionResponse: {
             name: name,
             response: {
-              content: `Error: Failed to execute tool ${name}. ${error.message}`,
+              content: `Error: Function ${name} is not implemented.`,
             },
           },
         };
       }
-    } else {
-      console.error(`Error: Function ${name} not found in sheetsService.`);
-      return {
-        functionResponse: {
-          name: name,
-          response: { content: `Error: Function ${name} is not implemented.` },
-        },
-      };
-    }
-  }
-
-  // --- Conversational Loop ---
-  while (true) {
-    const prompt = readlineSync.question("You: ");
-
-    if (prompt.toLowerCase() === "exit") {
-      console.log("Exiting chat.");
-      break;
     }
 
-    try {
-      const result = await chat.sendMessage(prompt);
-      const response = result.response;
-
-      if (
-        response.candidates &&
-        response.candidates[0] &&
-        response.candidates[0].content &&
-        response.candidates[0].content.parts &&
-        response.candidates[0].content.parts[0] &&
-        response.candidates[0].content.parts[0].functionCall
-      ) {
-        // Gemini wants to call a tool
-        const functionCall =
-          response.candidates[0].content.parts[0].functionCall;
-
-        // Call the tool and get its response
-        const toolResponse = await callTool(functionCall);
-
-        // Send the tool's result back to Gemini to get the final human-readable answer
-        const apiResponse = await chat.sendMessage([toolResponse]);
-        // Access the text from the final API response
-        if (
-          apiResponse.response.candidates &&
-          apiResponse.response.candidates[0] &&
-          apiResponse.response.candidates[0].content &&
-          apiResponse.response.candidates[0].content.parts &&
-          apiResponse.response.candidates[0].content.parts[0] &&
-          apiResponse.response.candidates[0].content.parts[0].text
-        ) {
-          console.log(
-            "Gemini:",
-            apiResponse?.response?.candidates?.[0]?.content?.parts?.[0].text
-          );
-        } else {
-          console.log(
-            "Gemini: (after tool call) No final text response or unexpected format."
-          );
-          console.log(
-            "Gemini API Response Structure (after tool call):",
-            JSON.stringify(apiResponse.response, null, 2)
-          );
-        }
-      } else if (
-        response.candidates &&
-        response.candidates[0] &&
-        response.candidates[0].content &&
-        response.candidates[0].content.parts &&
-        response.candidates[0].content.parts[0] &&
-        response.candidates[0].content.parts[0].text
-      ) {
-        console.log("---- No Function Calls ----");
-        console.log("Gemini:", response.candidates[0].content.parts[0].text);
-      } else {
-        console.log(
-          "Gemini: No specific response or tool call generated, or text content is not in the expected format."
-        );
-        console.log(
-          "Gemini Raw Response (first call - no tool):",
-          JSON.stringify(response, null, 2)
-        );
-      }
-    } catch (error) {
-      console.error("Error communicating with Gemini:", error);
-      console.log(
-        "Gemini: I encountered an error. Please try rephrasing your request."
-      );
-    }
+    console.log("Bot is ready to receive messages!");
+  } catch (error) {
+    console.error("Error initializing bot:", error);
+    process.exit(1);
   }
 }
 
-main().catch(console.error);
+// Start the bot
+initializeBot().catch(console.error);
